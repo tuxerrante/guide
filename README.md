@@ -6,13 +6,12 @@ Be aware, that the following sections might be opinionated. Kubernetes is an evo
 
 This guide is accompanied by a fully automated cluster setup solution in the shape of well structured, modular [Terraform](https://www.terraform.io/) recipes. Links to contextually related modules are spread throughout the guide, visually highlighted using the ![Terraform](assets/terraform.png) Terraform icon.
 
-If you find this project helpful, please consider supporting its future development on [GitHub Sponsors](https://github.com/users/pstadler/sponsorship). You can also get a great quality T-shirt [here](https://hobby-kube.dev/tshirt).
+If you find this project helpful, please consider supporting its future development on [GitHub Sponsors](https://github.com/users/pstadler/sponsorship).
 
 ## Table of Contents
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-
 
 - [Cluster size](#cluster-size)
 - [Choosing a cloud provider](#choosing-a-cloud-provider)
@@ -22,7 +21,7 @@ If you find this project helpful, please consider supporting its future developm
   - [Secure private networking](#secure-private-networking)
   - [WireGuard setup](#wireguard-setup)
 - [Installing Kubernetes](#installing-kubernetes)
-  - [Docker setup](#docker-setup)
+  - [Containerd setup](#containerd-setup)
   - [Etcd setup](#etcd-setup)
   - [Kubernetes setup](#kubernetes-setup)
     - [Initializing the master node](#initializing-the-master-node)
@@ -58,11 +57,15 @@ For a Kubernetes cluster to be resilient it's recommended that it consists of **
 ![Terraform](assets/terraform.png) [`provider/digitalocean`](https://github.com/hobby-kube/provisioning/tree/master/provider/digitalocean)
 ![Terraform](assets/terraform.png) [`provider/scaleway`](https://github.com/hobby-kube/provisioning/tree/master/provider/scaleway)
 
-At this point it's time to choose a cloud provider based on a few criteria such as trustworthiness, reliability, pricing and data center location. The very best offer at this time is definitely [Hetzner Cloud](https://www.hetzner.com/cloud) where one gets a suitable three node cluster up and running for **a little less than €7.50/month** (3x2GB), followed by [Scaleway](https://www.scaleway.com/) starting from just below €10 (3x2GB). Both Hetzner and Scaleway currently only operate data centers located in Europe.
+At this point it's time to choose a cloud provider based on a few criteria such as trustworthiness, reliability, pricing and data center location. The very best offer at this time is definitely from [Hetzner Cloud](https://hetzner.cloud/?ref=osR7dA9R4bmz) (referral link, get €20), where one gets a suitable three node cluster up and running for **around €13.50/month** (3x2GB, respectively 3x4GB with arm64 CPUs).
 
-[DigitalOcean](https://www.digitalocean.com/) is known for their great support and having data centers around the globe which is definitely a plus. A three node cluster will cost $15/month (3x1GB).
+[DigitalOcean](https://m.do.co/c/8bd7e234cf6c) (referral link, get $100) is known for their great support and having data centers around the globe which is definitely a plus. A three node cluster will cost $18/month (3x1GB).
+
+[Scaleway](https://www.scaleway.com/)'s instances start at around €5. A three node cluster will cost around €15/month (3x1GB, with 20GB disk space each).
 
 [Linode](https://www.linode.com/), [Vultr](https://www.vultr.com/) and a couple of other providers with similar offers are other viable options. While they all have their advantages and disadvantages, they should be perfectly fine for hosting a Kubernetes cluster.
+
+While pricing for virtual private servers has generally increased in the past years, the rise of arm64 based CPUs has opened doors for less expensive options. This guide results in a setup that can be operated on x86, as well as arm64 based systems.
 
 ## Choosing an operating system
 
@@ -116,11 +119,13 @@ A project called [WireGuard](https://www.WireGuard.io/) supplies the best of bot
 
 ![Terraform](assets/terraform.png) [`security/wireguard`](https://github.com/hobby-kube/provisioning/tree/master/security/wireguard)
 
-As mentioned above, WireGuard runs as a Kernel module and needs to be compiled against the headers of the Kernel running on the host. In most cases it's enough to follow the simple instructions found here: [WireGuard Installation](https://www.WireGuard.io/install/).
+Let's start off by installing WireGuard. Follow the instructions found here: [WireGuard Installation](https://www.wireguard.com/install/).
 
-Scaleway uses custom Kernel versions which makes the installation process a little more complex. Fortunately, they provide a [shell script](https://github.com/scaleway/kernel-tools#how-to-build-a-custom-kernel-module) to download the required headers without much hassle.
+```sh
+apt install wireguard
+```
 
-Once WireGuard has been compiled, it's time to create the configuration files. Each host should connect to its peers to create a secure network overlay via a tunnel interface called wg0. Let's assume the setup consists of three hosts and each one will get a new VPN IP address in the 10.0.1.1/24 range:
+Once WireGuard has been installed, it's time to create the configuration files. Each host should connect to its peers to create a secure network overlay via a tunnel interface called wg0. Let's assume the setup consists of three hosts and each one will get a new VPN IP address in the 10.0.1.1/24 range:
 
 | Host  | Private IP address  (ethN) | VPN IP address (wg0) |
 | ----- | -------------------------- | -------------------- |
@@ -173,10 +178,15 @@ ufw allow in on wg0
 ufw reload
 ```
 
-Before starting WireGuard we need to make sure that ip forwarding is enabled. Executing `sysctl net.ipv4.ip_forward` should show `net.ipv4.ip_forward = 1`. If this is not the case, run the following commands:
+Before starting WireGuard we need to make sure that ip forwarding and a few other required network settings are enabled:
 
 ```sh
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf # enable ip4 forwarding
+echo br_netfilter > /etc/modules-load.d/kubernetes.conf
+modprobe br_netfilter
+
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+echo "net.bridge.bridge-nf-call-iptables=1" >> /etc/sysctl.conf
+
 sysctl -p # apply settings from /etc/sysctl.conf
 ```
 
@@ -212,20 +222,32 @@ Last but not least, run `systemctl enable wg-quick@wg0` to launch the service wh
 
 There are plenty of ways to set up a Kubernetes cluster from scratch. At this point however, we settle on [kubeadm](https://kubernetes.io/docs/getting-started-guides/kubeadm/). This dramatically simplifies the setup process by automating the creation of certificates, services and configuration files.
 
-Before getting started with Kubernetes itself, we need to take care of setting up two essential services that are not part of the actual stack, namely **Docker** and **etcd**.
+Before getting started with Kubernetes itself, we need to take care of setting up two essential services that are not part of the actual stack, namely **containerd** and **etcd**. We've been using Docker in the past, but containerd is now preferred.
 
-### Docker setup
+### Containerd setup
 
-Docker is directly available from the package registries of most Linux distributions. Hints regarding supported versions are available in [the official kubeadm guide](https://kubernetes.io/docs/setup/independent/install-kubeadm/). Simply use your preferred way of installation. Running `apt-get install docker.io` on Ubuntu will install a stable version, although not the most recent one, but this is perfectly fine in our case.
-
-Kubernetes recommends running Docker with Iptables and IP Masq disabled. The easiest way to achieve this is by creating a systemd unit file to set the required configuration flags:
+[containerd](https://containerd.io/) is robust container runtime. Hints regarding supported versions are available in [the official container runtimes guide](https://kubernetes.io/docs/setup/production-environment/container-runtimes/). Let's install a supported containerd version:
 
 ```sh
-# /etc/systemd/system/docker.service.d/10-docker-opts.conf
-Environment="DOCKER_OPTS=--iptables=false --ip-masq=false"
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmour -o /etc/apt/keyrings/docker.gpg
+echo "deb [signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+apt-get install -y containerd.io=1.6.15-1 # Kubernetes 1.26 requires at least containerd v1.6
 ```
 
-If this file has been placed after Docker was installed, make sure to restart the service using `systemctl restart docker`.
+Kubernetes recommends running containerd with the cgroup driver. This can be done by creating a containerd config file and setting the required configuration flag:
+
+```sh
+# write default containerd config
+containerd config default > /etc/containerd/config.toml
+# set systemd cgroup flag to true
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+# enable containerd and restart
+systemctl enable containerd
+systemctl restart containerd
+```
 
 ### Etcd setup
 
@@ -236,7 +258,7 @@ If this file has been placed after Docker was installed, make sure to restart th
 Even though etcd is generally available with most package managers, it's recommended to manually install a more recent version:
 
 ```sh
-export ETCD_VERSION="v3.3.12"
+export ETCD_VERSION="v3.5.6"
 mkdir -p /opt/etcd
 curl -L https://storage.googleapis.com/etcd/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz \
   -o /opt/etcd-${ETCD_VERSION}-linux-amd64.tar.gz
@@ -286,15 +308,21 @@ Executing `/opt/etcd/etcdctl member list` should show a list of cluster members.
 
 ### Kubernetes setup
 
-Now that Docker is configured and etcd is running, it's time to deploy Kubernetes. The first step is to install the required packages on each host:
+Now that containerd is configured and etcd is running, it's time to deploy Kubernetes. The first step is to install the required packages on each host:
 
 ```sh
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-cat <<EOF > /etc/apt/sources.list.d/kubernetes.list
-deb http://apt.kubernetes.io/ kubernetes-xenial-unstable main
-EOF
+# https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/#install-using-native-package-management
+# (`xenial` is correct even for newer Ubuntu versions)
+curl -fsSLo /etc/apt/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" \
+  > /etc/apt/sources.list.d/kubernetes.list
+
 apt-get update
-apt-get install -y kubelet kubeadm kubectl kubernetes-cni
+
+apt-get install -y kubelet=1.26.0-00 kubeadm=1.26.0-00 kubectl=1.26.0-00 # kubernetes-cni package comes as dependency of the others
+# Pin Kubernetes major version since there are breaking changes between releases.
+# For example, Kubernetes 1.26 requires a newer containerd (https://kubernetes.io/blog/2022/11/18/upcoming-changes-in-kubernetes-1-26/#cri-api-removal).
+apt-mark hold kubelet kubeadm kubectl kubernetes-cni
 ```
 
 #### Initializing the master node
@@ -303,13 +331,13 @@ Before initializing the master node, we need to create a manifest on kube1 which
 
 ```yaml
 # /tmp/master-configuration.yml
-apiVersion: kubeadm.k8s.io/v1beta1
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 localAPIEndpoint:
   advertiseAddress: 10.0.1.1
   bindPort: 6443
 ---
-apiVersion: kubeadm.k8s.io/v1beta1
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 certificatesDir: /etc/kubernetes/pki
 apiServer:
@@ -325,6 +353,7 @@ etcd:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 failSwapOn: false
+cgroupDriver: systemd
 ```
 
 Then we run the following command on kube1:
@@ -334,22 +363,29 @@ kubeadm init --config /tmp/master-configuration.yml --ignore-preflight-errors=Sw
 ```
 After the setup is complete, kubeadm prints a token such as `818d5a.8b50eb5477ba4f40`. It's important to write it down, we'll need it in a minute to join the other cluster nodes.
 
-Kubernetes is built around openness, so it's up to us to choose and install a suitable pod network. This is required as it enables pods running on different nodes to communicate with each other. One of the [many options](https://kubernetes.io/docs/concepts/cluster-administration/addons/) is [Weave Net](https://www.weave.works/products/weave-net/). It requires zero configuration and is considered stable and well-maintained:
+Kubernetes is built around openness, so it's up to us to choose and install a suitable pod network. This is required as it enables pods running on different nodes to communicate with each other. One of the [many options](https://kubernetes.io/docs/concepts/cluster-administration/addons/) is [Cilium](https://cilium.io/). It requires little configuration and is considered stable and well-maintained:
 
 ```sh
 # create symlink for the current user in order to gain access to the API server with kubectl
 [ -d $HOME/.kube ] || mkdir -p $HOME/.kube
 ln -s /etc/kubernetes/admin.conf $HOME/.kube/config
 
-# install Weave Net
-kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+# install Cilium
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+CLI_ARCH="$(arch | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+rm cilium-linux-${CLI_ARCH}.tar.gz*
 
-# allow traffic on the newly created weave network interface
-ufw allow in on weave
+cilium install --version 1.14.1 --set ipam.mode=cluster-pool --set ipam.operator.clusterPoolIPv4PodCIDRList=10.96.0.0/16
+
+# allow traffic on the newly created Cilium network interface
+ufw allow in on cilium_vxlan
 ufw reload
 ```
 
-Unfortunately, Weave Net will not readily work with our current cluster configuration because traffic will be routed via the wrong network interface. This can be fixed by running the following command on each host:
+Cilium will not readily work with our current cluster configuration because traffic will be routed via the wrong network interface. This can be fixed by running the following command on each host:
 
 ```sh
 ip route add 10.96.0.0/16 dev $VPN_INTERFACE src $VPN_IP
@@ -385,12 +421,18 @@ After that we have to enable it by running following command:
 systemctl enable overlay-route.service
 ```
 
+Finally, we can check if everything works:
+
+```sh
+cilium status --wait
+```
+
 #### Joining the cluster nodes
 
 All that's left is to join the cluster with the other nodes. Run the following command on each host:
 
 ```sh
-kubeadm join --token=<TOKEN> 10.0.1.1:6443 \
+kubeadm join --token="<TOKEN>" 10.0.1.1:6443 \
   --discovery-token-unsafe-skip-ca-verification \
   --ignore-preflight-errors=Swap
 ```
@@ -417,10 +459,10 @@ kubectl config set-cluster kubernetes --server=https://<PUBLIC_IP_KUBE1>:6443
 You're now able to remotely access the Kubernetes API. Running `kubectl get nodes` should show a list of nodes similar to this:
 
 ```sh
-NAME    STATUS   ROLES    AGE   VERSION
-kube1   Ready    master   33m   v1.16.0
-kube2   Ready    <none>   33m   v1.16.0
-kube3   Ready    <none>   33m   v1.16.0
+NAME    STATUS   ROLES                  AGE     VERSION
+kube1   Ready    control-plane,master   5h11m   v1.21.1
+kube2   Ready    <none>                 5h11m   v1.21.1
+kube3   Ready    <none>                 5h11m   v1.21.1
 ```
 
 ### Role-Based Access Control
@@ -462,20 +504,19 @@ We already opened port 80 and 443 during the initial firewall configuration, now
 
 - [ingress/00-namespace.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/00-namespace.yml)
 - [ingress/deployment.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/deployment.yml)
-- [ingress/service.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/service.yml)
 - [ingress/configmap.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/configmap.yml)
 
-One part requires special attention. In order to make sure NGINX runs on kube1—which is a tainted master node and no pods will normally be scheduled on it—we need to specify a toleration:
+One part requires special attention. In order to make sure NGINX runs on kube1—which is a tainted control-plane node and no pods will normally be scheduled on it—we need to specify a toleration:
 
 ```yaml
 # from ingress/deployment.yml
 tolerations:
-- key: node-role.kubernetes.io/master
+- key: node-role.kubernetes.io/control-plane
   operator: Equal
   effect: NoSchedule
 ```
 
-Specifying a toleration doesn't make sure that a pod is getting scheduled on any specific node. For this we need to add a node affinity rule. As we have just a single master node, the following specification is enough to schedule a pod on kube1:
+Specifying a toleration doesn't make sure that a pod is getting scheduled on any specific node. For this we need to add a node affinity rule. As we have just a single control-plane node, the following specification is enough to schedule a pod on kube1:
 
 ```yaml
 # from ingress/deployment.yml
@@ -484,7 +525,7 @@ affinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
       - matchExpressions:
-        - key: node-role.kubernetes.io/master
+        - key: node-role.kubernetes.io/control-plane
           operator: Exists
 ```
 
@@ -493,13 +534,12 @@ Running `kubectl apply -f ingress/` will apply all manifests in this folder. Fir
 Services are now able to make use of the ingress controller and receive public traffic with a simple manifest:
 
 ```yaml
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: example-ingress
-  annotations:
-    kubernetes.io/ingress.class: "nginx"
 spec:
+  ingressClassName: "nginx"
   rules:
   - host: service.example.com
     http:
@@ -507,7 +547,7 @@ spec:
       - path: /
         backend:
           serviceName: example-service
-          servicePort: example-service-http
+          servicePort: http
 ```
 
 The NGINX ingress controller is quite flexible and supports a whole bunch of [configuration options](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/).
@@ -534,22 +574,22 @@ Additionally, it might be a good idea to assign a subdomain to each host, e.g. k
 
 Thanks to [Let’s Encrypt](https://letsencrypt.org/) and a project called [cert-manager](https://github.com/jetstack/cert-manager) it's incredibly easy to obtain free certificates for any domain name pointing at our Kubernetes cluster. Setting this service up takes no time and it plays well with the NGINX ingress controller we deployed earlier. These are the related manifests:
 
-- [ingress/tls/00-cert-manager-crds.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/tls/00-cert-manager-crds.yml)
-- [ingress/tls/cert-manager.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/tls/cert-manager.yml)
+- [ingress/tls/00-cert-manager.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/tls/00-cert-manager.yml)
+- [ingress/tls/cert-issuer.yml](https://github.com/hobby-kube/manifests/blob/master/ingress/tls/cert-issuer.yml)
 
-Before deploying cert-manager using the manifests above, make sure to replace the email address in `ingress/tls/cert-manager.yml` with your own.
+Before deploying cert-manager using the manifests above, make sure to replace the email address in `ingress/tls/cert-issuer.yml` with your own.
 
 To enable certificates for a service, the ingress manifest needs to be slightly extended:
 
 ```yaml
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: example-ingress
   annotations:
-    kubernetes.io/tls-acme: "true" # enable certificates
-    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt" # enable certificates
 spec:
+  ingressClassName: "nginx"
   tls: # specify domains to fetch certificates for
   - hosts:
     - service.example.com
@@ -561,7 +601,7 @@ spec:
       - path: /
         backend:
           serviceName: example-service
-          servicePort: example-service-http
+          servicePort: http
 ```
 
 After applying this manifest, cert-manager will try to obtain a certificate for service.example.com and reload the NGINX configuration to enable TLS. Make sure to check the logs of the cert-manager pod if something goes wrong.
@@ -630,7 +670,7 @@ Rook and Portworx both shine with a simple setup and transparent operations. Roo
 
 ### Deploying Rook
 
-As we run only a three node cluster, we're going to deploy Rook on all three of them by adding a master toleration to the Rook cluster definition.
+As we run only a three node cluster, we're going to deploy Rook on all three of them by adding a control-plane toleration to the Rook cluster definition.
 
 Before deploying Rook we need to either provide a raw, unformatted block device or specify a directory that will be used for storage on each host. On a typical Ubuntu installation, the volume on which the operating system is installed is called `/dev/vda`. Attaching another volume will be available as  `/dev/vdb`.
 
